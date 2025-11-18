@@ -1,7 +1,11 @@
-I m running this code in the copy activity in azure synapse in the query side(I m not able to make changes inside sql itself, so it has to be done here) the code almost runs, but this is my error:
+The error is coming from that monster REPLACE(...REPLACE(... block: there’s a parenthesis mismatch, so one of the REPLACE calls ends up being parsed without 3 arguments.
 
-code:
+You currently have 21 REPLACE( but only 20 closing ), so SQL chokes and says:
 
+The replace function requires 3 argument(s).
+Incorrect syntax near ','.
+
+Let me give you a cleaned-up version with the safe_base expression fixed and balanced.
 
 DECLARE @schema sysname = N'tdfschema';
 DECLARE @table  sysname = N'Key.Wrd4';
@@ -21,13 +25,46 @@ cols_sanitized AS (
         col_name,
         typ_name,
         -- Replace disallowed characters (including parentheses) with _
-        safe_base = REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-                    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-                    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(col_name,' ', '_'), ',', '_'),
-                    ';','_'),'{','_'),'}','_'),'[','_'),']','_'),'=','_'),'.','_'),'+','_'),
-                    '-','_'),'#','_'),'"','_'),'%','_'),'/','_'),'''','_'),':','_'),
-                    '(','_'),')','_')
-),
+        safe_base =
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(
+            REPLACE(col_name,' ', '_'), ',', '_'),
+                    ';','_'),
+                    '{','_'),
+                    '}','_'),
+                    '[','_'),
+                    ']','_'),
+                    '=','_'),
+                    '.','_'),
+                    '+','_'),
+                    '-','_'),
+                    '#','_'),
+                    '"','_'),
+                    '%','_'),
+                    '/','_'),
+                    '''','_'),
+                    ':','_'),
+                    '(','_'),
+                    ')','_')
+    ),
 cols_final AS (
     SELECT column_id, col_name, typ_name,
            base2 = CASE WHEN safe_base LIKE '[A-Za-z_]%' THEN safe_base ELSE N'c_' + safe_base END
@@ -65,18 +102,6 @@ SET @sql = N'SELECT ' + @select_list + CHAR(13)+CHAR(10) +
 EXEC sys.sp_executesql @sql;
 
 
+Key fix: that safe_base = REPLACE(... block now has 21 closing ) for 21 REPLACE( calls, and every REPLACE has 3 arguments.
 
-
-this is my error:
-
-
-Error
-Copy data1
-Troubleshoot activity failures
- {
-    "errorCode": "2200",
-    "message": "Failure happened on 'Source' side. 'Type=Microsoft.Data.SqlClient.SqlException,Message=The replace function requires 3 argument(s).\r\nIncorrect syntax near ','.,Source=Framework Microsoft SqlClient Data Provider,'",
-    "failureType": "UserError",
-    "target": "Copy data1",
-    "details": []
-} 
+If you paste this whole thing into the Synapse copy activity “query” box, it should compile and run. If it still errors, send me the new message and we’ll adjust the next thing.
