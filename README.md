@@ -1,21 +1,12 @@
-still getting this error: 
+Yeah, this is still the query text, not the data. That REPLACE chain is brittle as hell, and your current version actually does have an unbalanced set of parentheses (I counted them programmatically to be sure).
 
+Let’s stop fighting that and switch to a much cleaner approach: TRANSLATE.
 
+TRANSLATE lets you replace a whole set of single characters in one go, no 20× nested REPLACE() calls, no parenthesis misery.
 
-Error
-Copy data1
-Troubleshoot activity failures
- {
-    "errorCode": "2200",
-    "message": "Failure happened on 'Source' side. 'Type=Microsoft.Data.SqlClient.SqlException,Message=The replace function requires 3 argument(s).\r\nIncorrect syntax near ','.,Source=Framework Microsoft SqlClient Data Provider,'",
-    "failureType": "UserError",
-    "target": "Copy data1",
-    "details": []
-} 
+New version using TRANSLATE
 
-
-on this code:
-
+Paste this whole script into the Synapse “Source query” box:
 
 DECLARE @schema sysname = N'tdfschema';
 DECLARE @table  sysname = N'Key.Wrd4';
@@ -34,46 +25,12 @@ cols_sanitized AS (
         column_id,
         col_name,
         typ_name,
-        -- Replace disallowed characters (including parentheses) with _
-        safe_base =
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(
-            REPLACE(col_name, ' ', '_')
-                , ',', '_')
-                , ';', '_')
-                , '{', '_')
-                , '}', '_')
-                , '[', '_')
-                , ']', '_')
-                , '=', '_')
-                , '.', '_')
-                , '+', '_')
-                , '-', '_')
-                , '#', '_')
-                , '"', '_')
-                , '%', '_')
-                , '/', '_')
-                , '''', '_')
-                , ':', '_')
-                , '(', '_')
-                , ')', '_')
+        -- Replace disallowed characters (space, punctuation, parentheses) with _
+        safe_base = TRANSLATE(
+            col_name,
+            ' ,;{}[]=.#+"/%'':()-',
+            '___________________'
+        )
 ),
 cols_final AS (
     SELECT column_id, col_name, typ_name,
@@ -111,75 +68,28 @@ SET @sql = N'SELECT ' + @select_list + CHAR(13)+CHAR(10) +
 
 EXEC sys.sp_executesql @sql;
 
+What this does / why it fixes your error
 
+TRANSLATE(col_name, ' ,;{}[]=.#+"/%'':()-', '___________________')
 
-can we brainstorm on this? 
+First string = all characters you don’t like:
+space, ,, ;, {, }, [, ], =, ., +, -, #, ", /, %, ', :, (, ).
+(19 characters total)
 
+Second string = 19 underscores.
 
-if the pipeline “Source query” box only accepts a single SELECT statement (no variable declarations, no CTE chains, no dynamic SQL execution), then the original multi‑statement script can’t run there. That’s why you’re getting the REPLACE error: the copy activity is trying to parse a long, multi‑part batch in a context that expects just one SELECT, and the nested formatting gets mangled (often a parenthesis or the opening REPLACE( is stripped, leaving a dangling , ',' , '_' pattern).
+Result: every one of those characters becomes _ in one shot.
 
-Here’s what you can do under that constraint:
+No nested REPLACE chain → no way for SQL Server to complain “REPLACE requires 3 arguments” because we’re not using it anymore.
 
-1. Simplest: Drop the sanitizing logic from the query
-Just pull the data and let the pipeline mapping handle renaming / illegal character replacement.
+Everything else in your script (type casting, dynamic select list, NOLOCK) stays exactly as you had it.
 
-SELECT * FROM [tdfschema].[Key.Wrd4] WITH (NOLOCK);
+If you get a new error
 
-Then:
+If it says something like “TRANSLATE is not a recognized built-in function name” then we know your SQL compatibility level is too old / Synapse flavor doesn’t support TRANSLATE. In that case we’ll go to Plan B: either:
 
-In the Copy activity → Source tab: use that query.
-In Sink / Mapping: manually change target column names (replace spaces, punctuation). Data Factory / Synapse mapping lets you assign different sink column names even if source ones are messy.
-Pros: Zero SQL complexity.
-Cons: Manual mapping effort (only once if you reuse dataset).
+simplify to SELECT * and do renaming in mapping, or
 
-2. If you must cast problem data types (xml, variant, binary)
-Do a manual, static SELECT listing columns you care about. Example pattern (you’d have to know or inspect column names once):
+use a much smaller, correctly-balanced REPLACE chain only for the 2–3 characters that actually occur in your columns.
 
-SELECT CAST([SomeMoneyCol] AS decimal(19,4)) AS [SomeMoneyCol_1], CAST([SomeDateCol] AS datetime2(3)) AS [SomeDateCol_2], CONVERT(nvarchar(36), [SomeGuid]) AS [SomeGuid_3], [PlainCol] AS [PlainCol_4] FROM [tdfschema].[Key.Wrd4] WITH (NOLOCK);
-
-You’d only alias those that need casting; leave others direct.
-
-How to discover columns if you can’t run metadata scripts:
-
-Temporarily run: SELECT TOP 0 * FROM [tdfschema].[Key.Wrd4]; in a tool that lets you (SSMS, Azure portal query editor). If truly impossible, ask a DBA to give you the list once.
-Or run a one-off pipeline with SELECT * and inspect the preview schema, then copy column names out.
-3. Push sanitization upstream (preferred long term)
-Ask a DBA (or whoever has database access) to create a view with sanitized aliases:
-
-CREATE VIEW [tdfschema].[vw_KeyWrd4_Safe] AS SELECT CONVERT(nvarchar(4000), [SomeVariant]) AS SomeVariant_1, -- etc... * FROM [tdfschema].[Key.Wrd4];
-
-Then your pipeline Source query is just:
-
-SELECT * FROM [tdfschema].[vw_KeyWrd4_Safe];
-
-No dynamic SQL needed.
-
-4. Why you can’t safely auto-sanitize in the query field
-All dynamic approaches rely on:
-
-sys.columns or dm_exec_describe_first_result_set
-Building a string of column expressions
-Executing that string (EXEC / sp_executesql)
-The copy activity’s “Source query” must be a final row-returning SELECT. It does not execute batches containing EXEC or variable assembly. Even a CTE block with multiple WITH elements plus variable assignments tends to fail in that environment or gets normalized (removing line starts), which breaks your nested REPLACE parentheses.
-
-5. If you still want inline character replacement for just a few known bad column names
-You can alias each manually:
-
-SELECT [Col With Space] AS [Col_With_Space], [Col,Comma] AS [Col_Comma], [Col/Slash] AS [Col_Slash], [Col(Paren)] AS [Col_Paren], [NormalCol] AS [NormalCol] FROM [tdfschema].[Key.Wrd4] WITH (NOLOCK);
-
-That’s fully valid in the query field—no REPLACE needed if you just hand-normalize.
-
-6. Mapping vs. Query Tradeoff
-Approach	Effort	Flexibility	Risk of Syntax Errors
-SELECT * + Mapping	Low	High (rename anytime)	Very Low
-Manual SELECT aliases	Medium (once)	Medium	Low
-Upstream View	Medium (requires DBA)	High (reuse)	Very Low
-Dynamic build (original)	High	High	High (not supported in field)
-7. Recommended Path Now
-Start with SELECT * and do the renames in mapping. If later you need type normalization for downstream tools (like forcing dates to datetime2(3)), evolve to a static SELECT or a view.
-
-8. Quick checklist for you
-Replace current multi-statement script with: SELECT * FROM [tdfschema].[Key.Wrd4] WITH (NOLOCK);
-Open Mapping → sanitize column names (underscore invalid chars).
-Test run.
-Only if needed, iterate with explicit casts.
+But first: try this TRANSLATE version and send me the new error (or a success message 😄).
